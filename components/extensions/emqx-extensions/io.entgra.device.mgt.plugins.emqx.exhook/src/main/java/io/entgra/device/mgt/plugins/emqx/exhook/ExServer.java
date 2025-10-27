@@ -22,12 +22,10 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.protobuf.ByteString;
-import com.google.protobuf.GeneratedMessageV3;
 import io.entgra.device.mgt.core.device.mgt.common.DeviceIdentifier;
 import io.entgra.device.mgt.core.device.mgt.common.EnrolmentInfo;
 import io.entgra.device.mgt.core.device.mgt.common.exceptions.DeviceManagementException;
 import io.entgra.device.mgt.core.device.mgt.core.config.keymanager.KeyManagerConfigurations;
-import io.entgra.device.mgt.core.device.mgt.core.service.DeviceManagementProviderService;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import io.grpc.Status;
@@ -42,7 +40,6 @@ import org.apache.http.client.methods.HttpPost;
 import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
 import org.wso2.carbon.context.PrivilegedCarbonContext;
-
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Base64;
@@ -50,16 +47,21 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-
 import static io.entgra.device.mgt.plugins.emqx.exhook.HandlerConstants.MIN_TOKEN_LENGTH;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.Properties;
 
 public class ExServer {
+    private static final String CLIENT_SCOPE_CACHE_FILE = "clientScopeCache.properties";
     private static final Log logger = LogFactory.getLog(ExServer.class.getName());
-
-    private static Map<String, String> accessTokenMap = new ConcurrentHashMap<>();
-    private static Map<String, String> authorizedScopeMap = new ConcurrentHashMap<>();
+    private static final Map<String, String> clientScopeMap = new ConcurrentHashMap<>();
     private Server server;
     private final ExServerUtilityService utilityService;
+    private static ExecutorService executor;
 
     public ExServer(ExServerUtilityService utilityService) {
         this.utilityService = utilityService;
@@ -73,6 +75,8 @@ public class ExServer {
                 .addService(new HookProviderImpl(utilityService))
                 .build()
                 .start();
+        executor = Executors.newSingleThreadExecutor();
+        loadClientScopeMapCache();
         logger.info("Server started, listening on " + port);
         Runtime.getRuntime().addShutdownHook(new Thread() {
             @Override
@@ -101,6 +105,36 @@ public class ExServer {
     public void blockUntilShutdown() throws InterruptedException {
         if (server != null) {
             server.awaitTermination();
+        }
+    }
+
+    public static void loadClientScopeMapCache() {
+        File file = new File(CLIENT_SCOPE_CACHE_FILE);
+        if (!file.exists()) return;
+        Properties props = new Properties();
+        try (FileInputStream fis = new FileInputStream(file)) {
+            props.load(fis);
+            for (String key : props.stringPropertyNames()) {
+                clientScopeMap.put(key, props.getProperty(key));
+            }
+        } catch (IOException e) {
+            logger.error("Failed to load cache from file", e);
+        }
+    }
+
+    public static void saveClientScopeMapCache() {
+        Properties props = new Properties();
+        clientScopeMap.forEach(
+                (key, value) -> {
+                    if (!key.startsWith("paho")) {
+                        props.put(key, value);
+                    }
+                }
+        );
+        try (FileOutputStream fos = new FileOutputStream(CLIENT_SCOPE_CACHE_FILE)) {
+            props.store(fos, null);
+        } catch (IOException e) {
+            logger.error("Failed to save cache to file", e);
         }
     }
 
@@ -164,47 +198,11 @@ public class ExServer {
             responseObserver.onCompleted();
         }
 
-        public static DeviceManagementProviderService getDeviceManagementService() {
-            PrivilegedCarbonContext ctx = PrivilegedCarbonContext.getThreadLocalCarbonContext();
-            DeviceManagementProviderService deviceManagementProviderService =
-                    (DeviceManagementProviderService) ctx.getOSGiService(DeviceManagementProviderService.class, null);
-            if (deviceManagementProviderService == null) {
-                String msg = "DeviceImpl Management provider service has not initialized.";
-                logger.error(msg);
-//                throw new IllegalStateException(msg);
-            }
-            return deviceManagementProviderService;
-        }
-
         @Override
         public void onClientConnack(ClientConnackRequest request, StreamObserver<EmptySuccess> responseObserver) {
             DEBUG("onClientConnack", request);
             if (request.getResultCode().equals("success")) {
-                String accessToken = accessTokenMap.get(request.getConninfo().getClientid());
-                String scopeString = authorizedScopeMap.get(accessToken);
-                if (!StringUtils.isEmpty(scopeString)) {
-                    String[] scopeArray = scopeString.split(" ");
-                    String deviceType = null;
-                    String deviceId = null;
-                    for (String scope : scopeArray) {
-                        if (scope.startsWith("device_")) {
-                            String[] scopeParts = scope.split("_");
-                            deviceType = scopeParts[1];
-                            deviceId = scopeParts[2];
-                            break;
-                        }
-                    }
-                    if (!StringUtils.isEmpty(deviceType) && !StringUtils.isEmpty(deviceId)) {
-                        try {
-                            PrivilegedCarbonContext.getThreadLocalCarbonContext().setTenantDomain("carbon.super");
-                            PrivilegedCarbonContext.getThreadLocalCarbonContext().setTenantId(-1234);
-                            DeviceManagementProviderService deviceManagementProviderService = getDeviceManagementService();
-                            deviceManagementProviderService.changeDeviceStatus(new DeviceIdentifier(deviceId, deviceType), EnrolmentInfo.Status.ACTIVE);
-                        } catch (DeviceManagementException e) {
-                            logger.error("onClientConnack: Error while setting device status");
-                        }
-                    }
-                }
+                handleDeviceStatusChange(request.getConninfo().getClientid(), EnrolmentInfo.Status.ACTIVE);
             }
             EmptySuccess reply = EmptySuccess.newBuilder().build();
             responseObserver.onNext(reply);
@@ -214,6 +212,10 @@ public class ExServer {
         @Override
         public void onClientConnected(ClientConnectedRequest request, StreamObserver<EmptySuccess> responseObserver) {
             DEBUG("onClientConnected", request);
+            String clientId = request.getClientinfo().getClientid();
+            if(!clientId.startsWith("paho")) {
+                executor.submit(ExServer::saveClientScopeMapCache);
+            }
             EmptySuccess reply = EmptySuccess.newBuilder().build();
             responseObserver.onNext(reply);
             responseObserver.onCompleted();
@@ -222,6 +224,10 @@ public class ExServer {
         @Override
         public void onClientDisconnected(ClientDisconnectedRequest request, StreamObserver<EmptySuccess> responseObserver) {
             logger.info("onClientDisconnected -----------------------------");
+            String clientId = request.getClientinfo().getClientid();
+            handleDeviceStatusChange(clientId, EnrolmentInfo.Status.UNREACHABLE);
+            clientScopeMap.remove(clientId);
+            executor.submit(ExServer::saveClientScopeMapCache);
             DEBUG("onClientDisconnected", request);
             EmptySuccess reply = EmptySuccess.newBuilder().build();
             responseObserver.onNext(reply);
@@ -323,8 +329,8 @@ public class ExServer {
                 }
 
                 // Token is valid
-                accessTokenMap.put(clientId, token);
-                authorizedScopeMap.put(token, tokenJson.get("scope").getAsString());
+                String scopes = tokenJson.get("scope").getAsString();
+                clientScopeMap.put(clientId, scopes);
 
                 ValuedResponse reply = ValuedResponse.newBuilder()
                         .setBoolResult(true)
@@ -358,14 +364,8 @@ public class ExServer {
                 }
                 String topic = request.getTopic();
                 ClientCheckAclRequest.AclReqType aclType = request.getType();
-                String accessToken = accessTokenMap.get(clientId);
-                if (StringUtils.isEmpty(accessToken)) {
-                    throw Status.PERMISSION_DENIED
-                            .withDescription("Access token not found for clientId: " + clientId)
-                            .asRuntimeException();
-                }
 
-                String authorizedScopeList = authorizedScopeMap.get(accessToken);
+                String authorizedScopeList = clientScopeMap.get(clientId);
                 if (StringUtils.isEmpty(authorizedScopeList)) {
                     throw Status.PERMISSION_DENIED
                             .withDescription("No authorized scopes found for token")
@@ -487,33 +487,6 @@ public class ExServer {
         @Override
         public void onSessionTerminated(SessionTerminatedRequest request, StreamObserver<EmptySuccess> responseObserver) {
             DEBUG("onSessionTerminated", request);
-
-            String accessToken = accessTokenMap.get(request.getClientinfo().getClientid());
-            if (!StringUtils.isEmpty(accessToken)) {
-                String scopeString = authorizedScopeMap.get(accessToken);
-                String[] scopeArray = scopeString.split(" ");
-                String deviceType = null;
-                String deviceId = null;
-                for (String scope : scopeArray) {
-                    if (scope.startsWith("device:")) {
-                        String[] scopeParts = scope.split(":");
-                        deviceType = scopeParts[1];
-                        deviceId = scopeParts[2];
-                        break;
-                    }
-                }
-                if (!StringUtils.isEmpty(deviceType) && !StringUtils.isEmpty(deviceId)) {
-                    try {
-                        PrivilegedCarbonContext.getThreadLocalCarbonContext().setTenantDomain("carbon.super");
-                        PrivilegedCarbonContext.getThreadLocalCarbonContext().setTenantId(-1234);
-                        DeviceManagementProviderService deviceManagementProviderService = getDeviceManagementService();
-                        deviceManagementProviderService.changeDeviceStatus(new DeviceIdentifier(deviceId, deviceType), EnrolmentInfo.Status.UNREACHABLE);
-                    } catch (DeviceManagementException e) {
-                        logger.error("onSessionTerminated: Error while setting device status");
-                    }
-                }
-            }
-
             EmptySuccess reply = EmptySuccess.newBuilder().build();
             responseObserver.onNext(reply);
             responseObserver.onCompleted();
@@ -609,6 +582,47 @@ public class ExServer {
                 observer.onError(Status.INTERNAL.withDescription(msg).withCause(e).asRuntimeException());
             }
         }
-    }
 
+        /**
+         * Updates the status of a device for the given client ID.
+         *
+         * @param clientId the client identifier
+         * @param status the new device status
+         * @implNote Tenant info is currently hardcoded and should be dynamic in future.
+         */
+        private void handleDeviceStatusChange(String clientId, EnrolmentInfo.Status status) {
+            String scopeString = clientScopeMap.get(clientId);
+            if (StringUtils.isEmpty(scopeString)) {
+                logger.warn("No scope found for clientId: " + clientId);
+                return;
+            }
+            String[] scopeArray = scopeString.split(" ");
+            String deviceType = null;
+            String deviceId = null;
+
+            for (String scope : scopeArray) {
+                if (scope.matches("^device:[^:]+:[^:]+$")) {
+                    String[] scopeParts = scope.split(":");
+                    deviceType = scopeParts[1];
+                    deviceId = scopeParts[2];
+                    break;
+                }
+            }
+
+            if (!StringUtils.isEmpty(deviceType) && !StringUtils.isEmpty(deviceId)) {
+                try {
+                    PrivilegedCarbonContext carbonContext = PrivilegedCarbonContext.getThreadLocalCarbonContext();
+                    // TODO: fetch tenant dynamically instead of hardcoding
+                    carbonContext.setTenantDomain("carbon.super");
+                    carbonContext.setTenantId(-1234);
+                    utilityService.changeDeviceStatus(new DeviceIdentifier(deviceId, deviceType), status);
+                    logger.info(String.format("Device status changed successfully: [deviceType=%s, deviceId=%s, status=%s]", deviceType, deviceId, status));
+                } catch (DeviceManagementException e) {
+                    logger.error("Error while setting device status for deviceId: " + deviceId, e);
+                }
+            } else {
+                logger.warn("Invalid or missing deviceType/deviceId for clientId: " + clientId);
+            }
+        }
+    }
 }

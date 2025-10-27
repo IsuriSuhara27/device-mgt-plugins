@@ -22,10 +22,10 @@ import io.entgra.device.mgt.core.apimgt.application.extension.bean.ApiApplicatio
 import io.entgra.device.mgt.core.apimgt.application.extension.bean.Token;
 import io.entgra.device.mgt.core.apimgt.application.extension.bean.TokenCreationProfile;
 import io.entgra.device.mgt.core.apimgt.application.extension.exception.APIManagerException;
-import io.entgra.device.mgt.plugins.output.adapter.mqtt.internal.OutputAdapterServiceDataHolder;
-import org.apache.commons.lang.StringUtils;
 import io.entgra.device.mgt.core.apimgt.extension.rest.api.exceptions.BadRequestException;
 import io.entgra.device.mgt.core.apimgt.extension.rest.api.exceptions.UnexpectedResponseException;
+import io.entgra.device.mgt.plugins.output.adapter.mqtt.internal.OutputAdapterServiceDataHolder;
+import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.commons.ssl.Base64;
@@ -38,8 +38,6 @@ import org.wso2.carbon.context.PrivilegedCarbonContext;
 import org.wso2.carbon.event.output.adapter.core.exception.ConnectionUnavailableException;
 import org.wso2.carbon.event.output.adapter.core.exception.OutputEventAdapterException;
 import org.wso2.carbon.event.output.adapter.core.exception.OutputEventAdapterRuntimeException;
-
-import static io.entgra.device.mgt.plugins.output.adapter.mqtt.util.MQTTEventAdapterConstants.TOKEN_SPLIT_INDEX;
 
 /**
  * MQTT publisher related configuration initialization and publishing capabilties are implemented here.
@@ -79,8 +77,7 @@ public class MQTTAdapterPublisher {
             connectionOptions.setKeepAliveInterval(keepAlive);
             if (mqttBrokerConnectionConfiguration.getUsername() != null) {
                 String accessToken = getToken();
-                connectionOptions.setUserName(accessToken.substring(0, TOKEN_SPLIT_INDEX));
-                connectionOptions.setPassword(accessToken.substring(TOKEN_SPLIT_INDEX).toCharArray());
+                connectionOptions.setUserName(accessToken);
             }
             // Construct an MQTT blocking mode client
             mqttClient = new MqttClient(mqttBrokerConnectionConfiguration.getBrokerUrl(), clientId, dataStore);
@@ -88,7 +85,7 @@ public class MQTTAdapterPublisher {
 
         } catch (MqttException e) {
             log.error("Error occurred when constructing MQTT client for broker url : "
-                              + mqttBrokerConnectionConfiguration.getBrokerUrl(), e);
+                    + mqttBrokerConnectionConfiguration.getBrokerUrl(), e);
             handleException(e);
         }
     }
@@ -141,7 +138,7 @@ public class MQTTAdapterPublisher {
     private String getToken() {
         String dcrUrlString = this.mqttBrokerConnectionConfiguration.getDcrUrl();
         final String applicationName = MQTTEventAdapterConstants.APPLICATION_NAME_PREFIX
-                        + mqttBrokerConnectionConfiguration.getAdapterName();
+                + mqttBrokerConnectionConfiguration.getAdapterName();
 
         if (dcrUrlString != null && !dcrUrlString.isEmpty()) {
             PrivilegedCarbonContext.startTenantFlow();
@@ -192,7 +189,7 @@ public class MQTTAdapterPublisher {
             scopes += " perm:topic:pub:" + tenantDomain + ":+:+:operation";
 
             if (!StringUtils.isEmpty(mqttBrokerConnectionConfiguration.getTopic())) {
-                scopes += " perm:topic:pub:" + mqttBrokerConnectionConfiguration.getTopic().replace("/",":");
+                scopes += " perm:topic:pub:" + mqttBrokerConnectionConfiguration.getTopic().replace("/", ":");
             }
 
             TokenCreationProfile tokenCreationProfile = new TokenCreationProfile();
