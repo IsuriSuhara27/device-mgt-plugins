@@ -24,18 +24,23 @@ import io.entgra.device.mgt.core.apimgt.application.extension.bean.TokenCreation
 import io.entgra.device.mgt.core.apimgt.application.extension.exception.APIManagerException;
 import io.entgra.device.mgt.core.apimgt.extension.rest.api.exceptions.BadRequestException;
 import io.entgra.device.mgt.core.apimgt.extension.rest.api.exceptions.UnexpectedResponseException;
-import org.apache.commons.codec.binary.Base64;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.eclipse.paho.client.mqttv3.*;
-import org.eclipse.paho.client.mqttv3.persist.MqttDefaultFilePersistence;
-import org.wso2.carbon.context.PrivilegedCarbonContext;
-import org.wso2.carbon.core.ServerStatus;
-import org.wso2.carbon.core.multitenancy.utils.TenantAxisUtils;
 import io.entgra.device.mgt.plugins.input.adapter.extension.ContentInfo;
 import io.entgra.device.mgt.plugins.input.adapter.extension.ContentTransformer;
 import io.entgra.device.mgt.plugins.input.adapter.extension.ContentValidator;
 import io.entgra.device.mgt.plugins.input.adapter.mqtt.internal.InputAdapterServiceDataHolder;
+import org.apache.commons.codec.binary.Base64;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
+import org.eclipse.paho.client.mqttv3.MqttCallback;
+import org.eclipse.paho.client.mqttv3.MqttClient;
+import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
+import org.eclipse.paho.client.mqttv3.MqttException;
+import org.eclipse.paho.client.mqttv3.MqttMessage;
+import org.eclipse.paho.client.mqttv3.persist.MqttDefaultFilePersistence;
+import org.wso2.carbon.context.PrivilegedCarbonContext;
+import org.wso2.carbon.core.ServerStatus;
+import org.wso2.carbon.core.multitenancy.utils.TenantAxisUtils;
 import org.wso2.carbon.event.input.adapter.core.InputEventAdapterConfiguration;
 import org.wso2.carbon.event.input.adapter.core.InputEventAdapterListener;
 import org.wso2.carbon.event.input.adapter.core.exception.InputEventAdapterRuntimeException;
@@ -43,8 +48,6 @@ import org.wso2.carbon.utils.multitenancy.MultitenantConstants;
 
 import java.util.HashMap;
 import java.util.Map;
-
-import static io.entgra.device.mgt.plugins.input.adapter.mqtt.util.MQTTEventAdapterConstants.TOKEN_SPLIT_INDEX;
 
 public class MQTTAdapterListener implements MqttCallback, Runnable {
     private static final Log log = LogFactory.getLog(MQTTAdapterListener.class);
@@ -149,8 +152,7 @@ public class MQTTAdapterListener implements MqttCallback, Runnable {
                     }
 
                     String accessToken = getToken(apiApplicationKey.getClientId(), apiApplicationKey.getClientSecret());
-                    connectionOptions.setUserName(accessToken.substring(0, TOKEN_SPLIT_INDEX));
-                    connectionOptions.setPassword(accessToken.substring(TOKEN_SPLIT_INDEX).toCharArray());
+                    connectionOptions.setUserName(accessToken);
                 } catch (APIManagerException e) {
                     log.error("Failed to create an oauth token with client_credentials grant type.", e);
                     return false;
@@ -211,7 +213,7 @@ public class MQTTAdapterListener implements MqttCallback, Runnable {
     @Override
     public void messageArrived(String topic, MqttMessage mqttMessage) throws Exception {
         try {
-            String mqttMsgString =  mqttMessage.toString();
+            String mqttMsgString = mqttMessage.toString();
             String msgText = mqttMsgString.substring(mqttMsgString.indexOf("{"), mqttMsgString.lastIndexOf("}") + 1);
             if (log.isDebugEnabled()) {
                 log.debug(msgText);
@@ -251,7 +253,7 @@ public class MQTTAdapterListener implements MqttCallback, Runnable {
                 inputEventAdapterListener.onEvent(msgText);
             }
         } catch (Exception ex) {
-          log.error("Error in message arrive : ", ex);
+            log.error("Error in message arrive : ", ex);
         } finally {
             PrivilegedCarbonContext.endTenantFlow();
         }
@@ -299,7 +301,7 @@ public class MQTTAdapterListener implements MqttCallback, Runnable {
         PrivilegedCarbonContext.getThreadLocalCarbonContext().setTenantDomain(tenantDomain, true);
         try {
             String scopes = mqttBrokerConnectionConfiguration.getBrokerScopes();
-            scopes += " perm:topic:sub:" + this.topic.replace("/",":");
+            scopes += " perm:topic:sub:" + this.topic.replace("/", ":");
 
             TokenCreationProfile tokenCreationProfile = new TokenCreationProfile();
             tokenCreationProfile.setGrantType("client_credentials");
