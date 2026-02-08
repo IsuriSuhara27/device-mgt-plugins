@@ -202,7 +202,7 @@ public class ExServer {
         public void onClientConnack(ClientConnackRequest request, StreamObserver<EmptySuccess> responseObserver) {
             DEBUG("onClientConnack", request);
             if (request.getResultCode().equals("success")) {
-                handleDeviceStatusChange(request.getConninfo().getClientid(), EnrolmentInfo.Status.ACTIVE);
+//                handleDeviceStatusChange(request.getConninfo().getClientid(), EnrolmentInfo.Status.ACTIVE);
             }
             EmptySuccess reply = EmptySuccess.newBuilder().build();
             responseObserver.onNext(reply);
@@ -225,7 +225,7 @@ public class ExServer {
         public void onClientDisconnected(ClientDisconnectedRequest request, StreamObserver<EmptySuccess> responseObserver) {
             logger.info("onClientDisconnected -----------------------------");
             String clientId = request.getClientinfo().getClientid();
-            handleDeviceStatusChange(clientId, EnrolmentInfo.Status.UNREACHABLE);
+//            handleDeviceStatusChange(clientId, EnrolmentInfo.Status.UNREACHABLE);
             clientScopeMap.remove(clientId);
             executor.submit(ExServer::saveClientScopeMapCache);
             DEBUG("onClientDisconnected", request);
