@@ -57,8 +57,11 @@ import java.util.Properties;
 
 public class ExServer {
     private static final String CLIENT_SCOPE_CACHE_FILE = "clientScopeCache.properties";
+    private static final String CACHE_VALUE_SEPARATOR = "||";
+    private static final String EXPIRED_TOKEN_GRACE_MS_PROPERTY = "exhook.allowExpiredTokenGraceMs";
     private static final Log logger = LogFactory.getLog(ExServer.class.getName());
     private static final Map<String, String> clientScopeMap = new ConcurrentHashMap<>();
+    private static final Map<String, Long> clientAuthTimestampMap = new ConcurrentHashMap<>();
     private Server server;
     private final ExServerUtilityService utilityService;
     private static ExecutorService executor;
@@ -115,7 +118,19 @@ public class ExServer {
         try (FileInputStream fis = new FileInputStream(file)) {
             props.load(fis);
             for (String key : props.stringPropertyNames()) {
-                clientScopeMap.put(key, props.getProperty(key));
+                String value = props.getProperty(key);
+                int separatorIndex = value.lastIndexOf(CACHE_VALUE_SEPARATOR);
+                if (separatorIndex > -1) {
+                    clientScopeMap.put(key, value.substring(0, separatorIndex));
+                    try {
+                        clientAuthTimestampMap.put(key,
+                                Long.parseLong(value.substring(separatorIndex + CACHE_VALUE_SEPARATOR.length())));
+                    } catch (NumberFormatException e) {
+                        logger.warn("Failed to parse cached auth timestamp for clientId: " + key, e);
+                    }
+                } else {
+                    clientScopeMap.put(key, value);
+                }
             }
         } catch (IOException e) {
             logger.error("Failed to load cache from file", e);
@@ -127,7 +142,12 @@ public class ExServer {
         clientScopeMap.forEach(
                 (key, value) -> {
                     if (!key.startsWith("paho")) {
-                        props.put(key, value);
+                        Long authTimestamp = clientAuthTimestampMap.get(key);
+                        if (authTimestamp != null) {
+                            props.put(key, value + CACHE_VALUE_SEPARATOR + authTimestamp);
+                        } else {
+                            props.put(key, value);
+                        }
                     }
                 }
         );
@@ -226,7 +246,10 @@ public class ExServer {
             logger.info("onClientDisconnected -----------------------------");
             String clientId = request.getClientinfo().getClientid();
             handleDeviceStatusChange(clientId, EnrolmentInfo.Status.UNREACHABLE);
-            clientScopeMap.remove(clientId);
+            if (!isExpiredTokenGraceEnabled()) {
+                clientScopeMap.remove(clientId);
+                clientAuthTimestampMap.remove(clientId);
+            }
             executor.submit(ExServer::saveClientScopeMapCache);
             DEBUG("onClientDisconnected", request);
             EmptySuccess reply = EmptySuccess.newBuilder().build();
@@ -325,12 +348,15 @@ public class ExServer {
 
                 JsonObject tokenJson = parsed.getAsJsonObject();
                 if (!tokenJson.get("active").getAsBoolean()) {
+                    if (tryAuthenticateWithExpiredTokenGrace(responseObserver, clientId)) {
+                        return;
+                    }
                     throw Status.UNAUTHENTICATED.withDescription("Token is inactive or expired").asRuntimeException();
                 }
 
                 // Token is valid
                 String scopes = tokenJson.get("scope").getAsString();
-                clientScopeMap.put(clientId, scopes);
+                cacheAuthorizedClient(clientId, scopes);
 
                 ValuedResponse reply = ValuedResponse.newBuilder()
                         .setBoolResult(true)
@@ -580,6 +606,59 @@ public class ExServer {
             } else {
                 logger.error(msg, e);
                 observer.onError(Status.INTERNAL.withDescription(msg).withCause(e).asRuntimeException());
+            }
+        }
+
+        private void cacheAuthorizedClient(String clientId, String scopes) {
+            clientScopeMap.put(clientId, scopes);
+            clientAuthTimestampMap.put(clientId, System.currentTimeMillis());
+        }
+
+        private boolean tryAuthenticateWithExpiredTokenGrace(StreamObserver<ValuedResponse> responseObserver,
+                                                             String clientId) {
+            long gracePeriodMs = getExpiredTokenGraceMs();
+            if (gracePeriodMs <= 0) {
+                return false;
+            }
+
+            String cachedScopes = clientScopeMap.get(clientId);
+            Long authTimestamp = clientAuthTimestampMap.get(clientId);
+            if (StringUtils.isEmpty(cachedScopes) || authTimestamp == null) {
+                return false;
+            }
+
+            long ageMs = System.currentTimeMillis() - authTimestamp;
+            if (ageMs > gracePeriodMs) {
+                logger.warn(String.format("Expired token grace rejected for clientId=%s due to stale cache. ageMs=%d",
+                        clientId, ageMs));
+                return false;
+            }
+
+            logger.warn(String.format("Allowing clientId=%s with expired token using cached scopes. ageMs=%d",
+                    clientId, ageMs));
+            ValuedResponse reply = ValuedResponse.newBuilder()
+                    .setBoolResult(true)
+                    .setType(ValuedResponse.ResponsedType.STOP_AND_RETURN)
+                    .build();
+            responseObserver.onNext(reply);
+            responseObserver.onCompleted();
+            return true;
+        }
+
+        private boolean isExpiredTokenGraceEnabled() {
+            return getExpiredTokenGraceMs() > 0;
+        }
+
+        private long getExpiredTokenGraceMs() {
+            String value = System.getProperty(EXPIRED_TOKEN_GRACE_MS_PROPERTY);
+            if (StringUtils.isEmpty(value)) {
+                return 0L;
+            }
+            try {
+                return Long.parseLong(value);
+            } catch (NumberFormatException e) {
+                logger.warn("Invalid expired token grace period: " + value, e);
+                return 0L;
             }
         }
 
